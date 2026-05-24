@@ -1,7 +1,10 @@
 const crypto = require('crypto');
+const express = require('express');
 const axios = require('axios');
 const { google } = require('googleapis');
 const { Readable } = require('stream');
+
+const app = express();
 
 const LINE_ACCESS_TOKEN  = process.env.LINE_CHANNEL_ACCESS_TOKEN || '';
 const LINE_SECRET        = process.env.LINE_CHANNEL_SECRET || '';
@@ -13,18 +16,16 @@ const REPORT_EXPIRY_MS   = (parseInt(process.env.REPORT_EXPIRY_MINUTES) || 10) *
 
 const reportMode = {};
 
-exports.main = async (req, res) => {
-  if (req.method !== 'POST') {
-    return res.status(200).send('OK');
-  }
+app.get('/', (req, res) => res.send('OK'));
+
+app.post('/', express.json(), async (req, res) => {
   const signature = req.headers['x-line-signature'] || '';
-  const body = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
+  const body = JSON.stringify(req.body);
   if (!verifySignature(body, signature)) {
     return res.status(200).json({ error: 'Invalid signature' });
   }
   try {
-    const payload = JSON.parse(body);
-    const events = payload.events || [];
+    const events = req.body.events || [];
     for (const event of events) {
       try { await handleEvent(event); } catch (err) {
         console.error('handleEvent error:', err.message);
@@ -34,7 +35,7 @@ exports.main = async (req, res) => {
     console.error('parse error:', err.message);
   }
   res.status(200).json({ ok: true });
-};
+});
 
 async function handleEvent(event) {
   if (event.type !== 'message') return;
@@ -111,10 +112,23 @@ async function replyMessage(replyToken, text) {
   } catch (e) {}
 }
 
-async function getSheetsClient() {
-  const auth = await google.auth.getClient({
-    scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+async function getAuth() {
+  const credsJson = process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON;
+  if (credsJson) {
+    const credentials = JSON.parse(credsJson);
+    const auth = new google.auth.GoogleAuth({
+      credentials,
+      scopes: ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive.file'],
+    });
+    return auth.getClient();
+  }
+  return google.auth.getClient({
+    scopes: ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive.file'],
   });
+}
+
+async function getSheetsClient() {
+  const auth = await getAuth();
   return google.sheets({ version: 'v4', auth });
 }
 
@@ -255,9 +269,7 @@ function mmddStr(d) {
 }
 
 async function saveToDrive(buffer, fileName, mimeType) {
-  const auth = await google.auth.getClient({
-    scopes: ['https://www.googleapis.com/auth/drive.file'],
-  });
+  const auth = await getAuth();
   const drive = google.drive({ version: 'v3', auth });
   const fileMetadata = { name: fileName };
   if (DRIVE_FOLDER_ID) fileMetadata.parents = [DRIVE_FOLDER_ID];
@@ -414,3 +426,6 @@ function getNextSeq(site, person, date) {
   photoCounters[key] = (photoCounters[key] || 0) + 1;
   return photoCounters[key];
 }
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log('LINE bot running on port ' + PORT));
