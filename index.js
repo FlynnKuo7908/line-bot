@@ -18,9 +18,11 @@ const reportMode = {};
 
 app.get('/', (req, res) => res.send('OK'));
 
-app.post('/', express.json(), async (req, res) => {
+app.post('/', express.json({
+  verify: (req, res, buf) => { req.rawBody = buf.toString(); },
+}), async (req, res) => {
   const signature = req.headers['x-line-signature'] || '';
-  const body = JSON.stringify(req.body);
+  const body = req.rawBody || JSON.stringify(req.body);
   if (!verifySignature(body, signature)) {
     return res.status(200).json({ error: 'Invalid signature' });
   }
