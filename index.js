@@ -46,22 +46,35 @@ async function handleEvent(event) {
   const rt  = event.replyToken;
   if (msg.type === 'text') {
     const text = msg.text.trim();
-    if (/^#派工/.test(text)) {
+    if (/^#我的ID/.test(text)) {
       if (src.type !== 'user') return;
-      await handleDispatch(text, src, rt);
+      await replyMessage(rt, '你的 LINE ID：' + src.userId);
+      return;
+    }
+    const senderName = await getLineDisplayName(src.userId);
+    if (/^#派工/.test(text)) {
+      if (src.type === 'user' || src.type === 'group') {
+        const admins = await getAdminList();
+        if (admins.length > 0 && !admins.includes(src.userId)) {
+          await replyMessage(rt, '⚠️ 你不是管理員，無法派工');
+          return;
+        }
+        await handleDispatch(text, src, rt, senderName);
+      }
     } else if (/^#請假/.test(text)) {
       if (src.type !== 'user') return;
-      await handleLeave(text, rt);
+      await handleLeave(text, rt, senderName);
     } else if (/^#加班/.test(text)) {
       if (src.type !== 'user') return;
-      await handleOT(text, rt);
+      await handleOT(text, rt, senderName);
     } else if (/^#回報/.test(text)) {
       if (src.type !== 'group') return;
-      await handleReportText(src, rt);
+      await handleReportText(src, rt, senderName);
     }
   } else if (msg.type === 'image') {
     if (src.type === 'group') {
-      await handleReportPhoto(msg.id, src, rt);
+      const senderName = await getLineDisplayName(src.userId);
+      await handleReportPhoto(msg.id, src, rt, senderName);
     }
   }
 }
@@ -134,12 +147,94 @@ async function getSheetsClient() {
   return google.sheets({ version: 'v4', auth });
 }
 
+const WEEKDAY_CHARS = ['日', '一', '二', '三', '四', '五', '六'];
+
+function dateStrWithWeek(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}/${m}/${day}(${WEEKDAY_CHARS[d.getDay()]})`;
+}
+
+async function ensureEmployeeSheet(name, dateStr) {
+  const sheets = await getSheetsClient();
+  const safe = name.replace(/[/\\?[\]*:]/g, '_');
+  const parts = dateStr.split('/');
+  const year = parseInt(parts[0]);
+  const month = parseInt(parts[1]);
+  const title = `員工:${safe} ${year}/${month}`;
+  const meta = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
+  let sheet = meta.data.sheets.find(s => s.properties.title === title);
+  if (!sheet) {
+    const days = new Date(year, month, 0).getDate();
+    const headers = ['日期', '狀態', '地點', '工作', '加班', '備註'];
+    const rows = [headers];
+    for (let d = 1; d <= days; d++) {
+      const dt = new Date(year, month - 1, d);
+      rows.push([dateStrWithWeek(dt), '', '', '', '', '']);
+    }
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: SHEET_ID,
+      requestBody: { requests: [{ addSheet: { properties: { title } } }] },
+    });
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SHEET_ID,
+      range: `${title}!A1`,
+      valueInputOption: 'RAW',
+      requestBody: { values: rows },
+    });
+  }
+  return title;
+}
+
+async function updateEmployeeRecord(name, dateStr, status, location, work, hours, note) {
+  try {
+    const title = await ensureEmployeeSheet(name, dateStr);
+    const sheets = await getSheetsClient();
+    const rowNum = await findEmployeeRowByDate(sheets, title, dateStr);
+    if (rowNum > 0) {
+      const existing = await sheets.spreadsheets.values.get({
+        spreadsheetId: SHEET_ID, range: `${title}!B${rowNum}:F${rowNum}`,
+      });
+      const cur = existing.data.values && existing.data.values[0] ? existing.data.values[0] : ['','','','',''];
+      const merged = [
+        status || cur[0] || '',
+        location !== undefined ? location : (cur[1] || ''),
+        work !== undefined ? work : (cur[2] || ''),
+        hours !== undefined ? hours : (cur[3] || ''),
+        note !== undefined ? note : (cur[4] || ''),
+      ];
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: SHEET_ID,
+        range: `${title}!B${rowNum}:F${rowNum}`,
+        valueInputOption: 'RAW',
+        requestBody: { values: [merged] },
+      });
+    }
+  } catch (e) {
+    console.error('updateEmployeeRecord error:', e.message);
+  }
+}
+
+async function findEmployeeRowByDate(sheets, title, dateStr) {
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID, range: `${title}!A:A`,
+  });
+  const dates = res.data.values || [];
+  const plain = dateStr.replace(/\(.\)$/, '');
+  for (let i = 0; i < dates.length; i++) {
+    const cell = (dates[i][0] || '').replace(/\(.\)$/, '');
+    if (cell === plain) return i + 1;
+  }
+  return -1;
+}
+
 async function getOrCreateSheet() {
   const sheets = await getSheetsClient();
   const meta = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
   let sheet = meta.data.sheets.find(s => s.properties.title === SHEET_NAME);
   if (!sheet) {
-    const headers = ['序號', '類型', '日期', '人員', '地點', '工作', '時數(H)', '備註', '照片連結', '建立時間'];
+    const headers = ['序號', '類型', '日期', '人員', '地點', '工作', '時數(H)', '備註', '照片連結', '建立時間', '派工者'];
     await sheets.spreadsheets.batchUpdate({
       spreadsheetId: SHEET_ID,
       requestBody: {
@@ -169,17 +264,17 @@ async function getNextSeq() {
   return isNaN(last) ? vals.length : last + 1;
 }
 
-async function appendRecord(type, date, person, location, work, hours, photoUrl, note) {
+async function appendRecord(type, date, person, location, work, hours, photoUrl, note, creator) {
   const seq = await getNextSeq();
   const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
   const sheets = await getSheetsClient();
   await sheets.spreadsheets.values.append({
     spreadsheetId: SHEET_ID,
-    range: `${SHEET_NAME}!A:J`,
+    range: `${SHEET_NAME}!A:K`,
     valueInputOption: 'RAW',
     insertDataOption: 'INSERT_ROWS',
     requestBody: {
-      values: [[seq, type, date, person, location, work, hours || '', photoUrl || '', note || '', now]],
+      values: [[seq, type, date, person, location, work, hours || '', photoUrl || '', note || '', now, creator || '']],
     },
   });
   return seq;
@@ -239,6 +334,25 @@ function matchEmployeeName(lineName, employees) {
   return null;
 }
 
+async function getAdminList() {
+  try {
+    const sheets = await getSheetsClient();
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: SHEET_ID,
+      range: '管理員!A:A',
+    });
+    const rows = res.data.values || [];
+    const out = [];
+    for (let i = 1; i < rows.length; i++) {
+      const id = (rows[i][0] || '').trim();
+      if (id) out.push(id);
+    }
+    return out;
+  } catch (e) {
+    return [];
+  }
+}
+
 const DAY_MAP = { '日':0, '一':1, '二':2, '三':3, '四':4, '五':5, '六':6 };
 
 function weekdayToDateStr(weekday) {
@@ -290,7 +404,7 @@ async function saveToDrive(buffer, fileName, mimeType) {
   return `https://drive.google.com/uc?id=${response.data.id}`;
 }
 
-async function handleDispatch(text, source, replyToken) {
+async function handleDispatch(text, source, replyToken, creator) {
   const lines = text.split('\n');
   const parsedAll = [];
   let inheritedDay = null;
@@ -305,7 +419,8 @@ async function handleDispatch(text, source, replyToken) {
       names = await getEmployeeList();
     }
     for (const name of names) {
-      await appendRecord('派工', result.dateStr, name, result.location, result.work, '', '', '');
+      await appendRecord('派工', result.dateStr, name, result.location, result.work, '', '', '', creator);
+      await updateEmployeeRecord(name, result.dateStr, '上工', result.location, result.work, '', '');
     }
     const displayNames = result.names.length > 0 ? result.names.join('.') : '全體';
     parsedAll.push(`${result.dateStr} ${result.location ? result.location + '/' : ''}${result.work} → ${displayNames}`);
@@ -340,7 +455,23 @@ function parseDispatchLine(line, inheritedDay) {
   return { weekday, dateStr: weekdayToDateStr(weekday), names, location, work };
 }
 
-async function handleLeave(text, replyToken) {
+function parseDateFromInput(str) {
+  const m = str.match(/^(\d{1,4})\/(\d{1,2})(?:\/(\d{1,2}))?$/);
+  if (!m) return null;
+  const now = new Date();
+  if (m[3]) {
+    return `${m[1]}/${String(Number(m[2])).padStart(2,'0')}/${String(Number(m[3])).padStart(2,'0')}`;
+  }
+  const month = Number(m[1]);
+  const day = Number(m[2]);
+  if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+    const y = now.getFullYear();
+    return `${y}/${String(month).padStart(2,'0')}/${String(day).padStart(2,'0')}`;
+  }
+  return null;
+}
+
+async function handleLeave(text, replyToken, creator) {
   const lines = text.split('\n');
   const details = [];
   const today = todayStr();
@@ -349,19 +480,31 @@ async function handleLeave(text, replyToken) {
     if (!line) continue;
     const parts = line.split(/\s+/);
     const name = parts[0] || '';
-    const reason = parts.slice(1).join(' ') || '請假';
+    let leaveDate = today;
+    let reason = '';
+    const remaining = parts.slice(1);
+    if (remaining.length > 0) {
+      const parsed = parseDateFromInput(remaining[0]);
+      if (parsed) {
+        leaveDate = parsed;
+        reason = remaining.slice(1).join(' ') || '請假';
+      } else {
+        reason = remaining.join(' ') || '請假';
+      }
+    }
     if (name) {
-      await appendRecord('請假', today, name, '', '', '', '', reason);
-      details.push(name + '(' + reason + ')');
+      await appendRecord('請假', leaveDate, name, '', '', '', '', reason, creator);
+      await updateEmployeeRecord(name, leaveDate, '請假', '', '', '', reason);
+      details.push(name + '(' + reason + (leaveDate !== today ? ' ' + leaveDate : '') + ')');
     }
   }
   const reply = details.length > 0
     ? '✅ 已記錄請假 ' + details.length + ' 人：' + details.join('、')
-    : '⚠️ 請假格式：\n#請假\n小名 事假';
+    : '⚠️ 請假格式：\n#請假\n小名 5/28 事假';
   await replyMessage(replyToken, reply);
 }
 
-async function handleOT(text, replyToken) {
+async function handleOT(text, replyToken, creator) {
   const lines = text.split('\n');
   const details = [];
   const today = todayStr();
@@ -369,33 +512,40 @@ async function handleOT(text, replyToken) {
     const line = lines[i].trim();
     if (!line) continue;
     const parts = line.split(/\s+/);
-    const name = parts[0] || '';
+    let name = parts[0] || '';
     const hours = parts[1] || '';
-    if (name && hours) {
-      await appendRecord('加班', today, name, '', '', hours, '', '');
-      details.push(name + ' ' + hours + 'H');
+    if (!name || !hours) continue;
+    let names = [name];
+    if (name === '全體') {
+      names = await getEmployeeList();
+    }
+    for (const n of names) {
+      await appendRecord('加班', today, n, '', '', hours, '', '', creator);
+      await updateEmployeeRecord(n, today, '加班', '', '', hours, '');
+      details.push(n + ' ' + hours + 'H');
     }
   }
   const reply = details.length > 0
     ? '✅ 已記錄加班 ' + details.length + ' 筆：' + details.join('、')
-    : '⚠️ 加班格式：\n#加班\n阿豪 4';
+    : '⚠️ 加班格式：\n#加班\n阿豪 4\n或\n#加班\n全體 4';
   await replyMessage(replyToken, reply);
 }
 
-async function handleReportText(source, replyToken) {
+async function handleReportText(source, replyToken, creator) {
   const userId = source.userId;
-  reportMode[userId] = Date.now();
+  reportMode[userId] = { ts: Date.now(), creator };
   await replyMessage(replyToken, '📋 已開啟回報模式，請傳送照片。');
 }
 
-async function handleReportPhoto(messageId, source, replyToken) {
+async function handleReportPhoto(messageId, source, replyToken, creator) {
   const userId = source.userId;
-  const ts = reportMode[userId];
-  if (!ts) return;
-  if (Date.now() - ts > REPORT_EXPIRY_MS) {
+  const mode = reportMode[userId];
+  if (!mode) return;
+  if (Date.now() - mode.ts > REPORT_EXPIRY_MS) {
     delete reportMode[userId];
     return;
   }
+  creator = creator || mode.creator;
   const displayName = await getLineDisplayName(userId);
   const employees = await getEmployeeList();
   const empName = matchEmployeeName(displayName, employees) || displayName;
@@ -410,12 +560,14 @@ async function handleReportPhoto(messageId, source, replyToken) {
   const photoUrl = await saveToDrive(buffer, fileName, contentType);
   if (assignment) {
     await appendPhotoToRecord(assignment.row, photoUrl);
+    await updateEmployeeRecord(empName, today, '上工', site, work, '', '');
     await replyMessage(replyToken,
       '📷 收到回報 ' + empName + '\n案場：' +
       (site ? site + (work ? '/' + work : '') : work) +
       '\n→ ' + fileName);
   } else {
-    await appendRecord('回報', today, empName, site, work, '', photoUrl, '無對應派工');
+    await appendRecord('回報', today, empName, site, work, '', photoUrl, '無對應派工', creator);
+    await updateEmployeeRecord(empName, today, '回報', site, work, '', '無對應派工');
     await replyMessage(replyToken,
       '📷 收到 ' + empName + ' 照片\n⚠️ 今日無對應派工紀錄\n→ ' + fileName);
   }
