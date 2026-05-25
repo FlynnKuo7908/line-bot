@@ -423,7 +423,7 @@ async function handleDispatch(text, source, replyToken, creator) {
     if (!line) continue;
     const result = parseDispatchLine(line, inheritedDay);
     if (!result) { continue; }
-    inheritedDay = result.weekday;
+    inheritedDay = result.dateStr;
     let names = result.names;
     if (names.length === 0) {
       names = await getEmployeeList();
@@ -484,20 +484,34 @@ async function handleCancelDispatch(text, replyToken, creator) {
 
 function parseDispatchLine(line, inheritedDay) {
   let text = line;
-  const dayMatch = text.match(/^(星期[一二三四五六日日]|週[一二三四五六日日])/);
-  let weekday = null;
-  if (dayMatch) {
-    weekday = dayMatch[1];
-    text = text.substring(dayMatch[0].length).trim();
+  let dateStr = null;
+
+  const dateMatch = text.match(/^(\d{1,4})\/(\d{1,2})(?:\/(\d{1,2}))?/);
+  if (dateMatch) {
+    const now = new Date();
+    if (dateMatch[3]) {
+      dateStr = `${parseInt(dateMatch[1])}/${String(parseInt(dateMatch[2])).padStart(2,'0')}/${String(parseInt(dateMatch[3])).padStart(2,'0')}`;
+    } else {
+      dateStr = `${now.getFullYear()}/${String(parseInt(dateMatch[1])).padStart(2,'0')}/${String(parseInt(dateMatch[2])).padStart(2,'0')}`;
+    }
+    text = text.substring(dateMatch[0].length).trim();
   } else {
-    weekday = inheritedDay;
+    const dayMatch = text.match(/^(星期[一二三四五六日日]|週[一二三四五六日日])/);
+    if (dayMatch) {
+      dateStr = weekdayToDateStr(dayMatch[1]);
+      text = text.substring(dayMatch[0].length).trim();
+    } else if (inheritedDay) {
+      dateStr = inheritedDay;
+    }
   }
-  if (!weekday) return null;
+  if (!dateStr) return null;
+
   const names = [];
   const re = /@([^\s@]+)/g;
   let m;
   while ((m = re.exec(text)) !== null) names.push(m[1]);
   text = text.replace(/@[^\s@]+/g, '').trim();
+
   let location = '';
   let work = text;
   const si = text.indexOf(' ');
@@ -505,7 +519,8 @@ function parseDispatchLine(line, inheritedDay) {
     location = text.substring(0, si).trim();
     work = text.substring(si + 1).trim();
   }
-  return { weekday, dateStr: weekdayToDateStr(weekday), names, location, work };
+
+  return { dateStr, names, location, work };
 }
 
 function parseDateFromInput(str) {
