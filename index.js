@@ -1,3 +1,9 @@
+// ============================================================
+// LINE 群組派工紀錄機器人 - Render / Express
+// 私訊: #派工 / #請假 / #加班
+// 群組: #回報 + 照片
+// ============================================================
+
 const crypto = require('crypto');
 const express = require('express');
 const axios = require('axios');
@@ -5,6 +11,10 @@ const { google } = require('googleapis');
 const { Readable } = require('stream');
 
 const app = express();
+
+// ============================================================
+// 環境變數（Render 設定）
+// ============================================================
 
 const LINE_ACCESS_TOKEN  = process.env.LINE_CHANNEL_ACCESS_TOKEN || '';
 const LINE_SECRET        = process.env.LINE_CHANNEL_SECRET || '';
@@ -14,18 +24,32 @@ const SHEET_NAME         = process.env.SHEET_NAME || '派工紀錄';
 const EMPLOYEE_SHEET     = process.env.EMPLOYEE_SHEET_NAME || '員工清單';
 const REPORT_EXPIRY_MS   = (parseInt(process.env.REPORT_EXPIRY_MINUTES) || 10) * 60 * 1000;
 
+// ============================================================
+// 記憶體暫存
+// ============================================================
+
 const reportMode = {};
 
+// ============================================================
+// Render 健康檢查（GET /）
+// ============================================================
+
 app.get('/', (req, res) => res.send('OK'));
+
+// ============================================================
+// LINE Webhook 入口（POST /）
+// ============================================================
 
 app.post('/', express.json({
   verify: (req, res, buf) => { req.rawBody = buf.toString(); },
 }), async (req, res) => {
   const signature = req.headers['x-line-signature'] || '';
   const body = req.rawBody || JSON.stringify(req.body);
+
   if (!verifySignature(body, signature)) {
     return res.status(200).json({ error: 'Invalid signature' });
   }
+
   try {
     const events = req.body.events || [];
     for (const event of events) {
@@ -36,14 +60,20 @@ app.post('/', express.json({
   } catch (err) {
     console.error('parse error:', err.message);
   }
+
   res.status(200).json({ ok: true });
 });
+
+// ============================================================
+// 事件分派
+// ============================================================
 
 async function handleEvent(event) {
   if (event.type !== 'message') return;
   const msg = event.message;
   const src = event.source;
   const rt  = event.replyToken;
+
   if (msg.type === 'text') {
     const text = msg.text.trim();
     if (/^#我的ID/.test(text)) {
@@ -87,7 +117,12 @@ async function handleEvent(event) {
       await handleReportPhoto(msg.id, src, rt, senderName);
     }
   }
+
 }
+
+// ============================================================
+// LINE 簽章驗證
+// ============================================================
 
 function verifySignature(body, signature) {
   if (!LINE_SECRET || !signature) return false;
@@ -99,6 +134,10 @@ function verifySignature(body, signature) {
     return false;
   }
 }
+
+// ============================================================
+// LINE API 工具
+// ============================================================
 
 const LINE_API = 'https://api.line.me/v2/bot';
 const LINE_DATA = 'https://api-data.line.me/v2/bot';
@@ -137,6 +176,10 @@ async function replyMessage(replyToken, text) {
   } catch (e) {}
 }
 
+// ============================================================
+// Google Sheets 工具
+// ============================================================
+
 async function getAuth() {
   const credsJson = process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON;
   if (credsJson) {
@@ -169,12 +212,15 @@ function dateStrWithWeek(d) {
 async function ensureEmployeeSheet(name, dateStr) {
   const sheets = await getSheetsClient();
   const safe = name.replace(/[/\\?[\]*:]/g, '_');
+
   const parts = dateStr.split('/');
   const year = parseInt(parts[0]);
   const month = parseInt(parts[1]);
+
   const title = `員工:${safe} ${year}/${month}`;
   const meta = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
   let sheet = meta.data.sheets.find(s => s.properties.title === title);
+
   if (!sheet) {
     const days = new Date(year, month, 0).getDate();
     const headers = ['日期', '狀態', '地點', '工作', '加班', '備註'];
@@ -243,12 +289,15 @@ async function getOrCreateSheet() {
   const sheets = await getSheetsClient();
   const meta = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
   let sheet = meta.data.sheets.find(s => s.properties.title === SHEET_NAME);
+
   if (!sheet) {
     const headers = ['序號', '類型', '日期', '人員', '地點', '工作', '時數(H)', '備註', '照片連結', '建立時間', '派工者'];
     await sheets.spreadsheets.batchUpdate({
       spreadsheetId: SHEET_ID,
       requestBody: {
-        requests: [{ addSheet: { properties: { title: SHEET_NAME } } }]
+        requests: [{
+          addSheet: { properties: { title: SHEET_NAME } }
+        }]
       }
     });
     await sheets.spreadsheets.values.update({
@@ -259,6 +308,7 @@ async function getOrCreateSheet() {
     });
     return { rowCount: 1 };
   }
+
   return { rowCount: (sheet.properties.gridProperties.rowCount || 1) };
 }
 
@@ -276,7 +326,8 @@ async function getNextSeq() {
 
 async function appendRecord(type, date, person, location, work, hours, photoUrl, note, creator) {
   const seq = await getNextSeq();
-  const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+  const tw = new Date(new Date().getTime() + 8 * 60 * 60 * 1000);
+  const now = `${tw.getFullYear()}/${String(tw.getMonth()+1).padStart(2,'0')}/${String(tw.getDate()).padStart(2,'0')} ${String(tw.getHours()).padStart(2,'0')}:${String(tw.getMinutes()).padStart(2,'0')}:${String(tw.getSeconds()).padStart(2,'0')}`;
   const sheets = await getSheetsClient();
   await sheets.spreadsheets.values.append({
     spreadsheetId: SHEET_ID,
@@ -284,7 +335,7 @@ async function appendRecord(type, date, person, location, work, hours, photoUrl,
     valueInputOption: 'RAW',
     insertDataOption: 'INSERT_ROWS',
     requestBody: {
-      values: [[seq, type, date, person, location, work, hours || '', photoUrl || '', note || '', now, creator || '']],
+      values: [[seq, type, date, person, location, work, hours || '', note || '', photoUrl || '', now, creator || '']],
     },
   });
   return seq;
@@ -322,6 +373,10 @@ async function findTodayAssignment(person, dateStr) {
   return null;
 }
 
+// ============================================================
+// 員工清單
+// ============================================================
+
 async function getEmployeeList() {
   const sheets = await getSheetsClient();
   const res = await sheets.spreadsheets.values.get({
@@ -330,7 +385,7 @@ async function getEmployeeList() {
   });
   const rows = res.data.values || [];
   const out = [];
-  for (let i = 1; i < rows.length; i++) {
+  for (let i = 0; i < rows.length; i++) {
     const name = (rows[i][0] || '').trim();
     if (name) out.push(name);
   }
@@ -344,6 +399,10 @@ function matchEmployeeName(lineName, employees) {
   return null;
 }
 
+// ============================================================
+// 日期工具
+// ============================================================
+
 async function getAdminList() {
   try {
     const sheets = await getSheetsClient();
@@ -353,7 +412,7 @@ async function getAdminList() {
     });
     const rows = res.data.values || [];
     const out = [];
-    for (let i = 1; i < rows.length; i++) {
+    for (let i = 0; i < rows.length; i++) {
       const name = (rows[i][0] || '').trim();
       if (name) out.push(name);
     }
@@ -369,7 +428,8 @@ function weekdayToDateStr(weekday) {
   const key = weekday.replace(/^(星期|週|周)/, '');
   const target = DAY_MAP[key];
   if (target === undefined) return todayStr();
-  const now = new Date();
+
+  const now = new Date(new Date().getTime() + 8 * 60 * 60 * 1000);
   const cur = now.getDay();
   let diff = target - cur;
   if (diff < 0) diff += 7;
@@ -385,7 +445,7 @@ function dateStr(d) {
 }
 
 function todayStr() {
-  return dateStr(new Date());
+  return dateStr(new Date(new Date().getTime() + 8 * 60 * 60 * 1000));
 }
 
 function mmddStr(d) {
@@ -394,260 +454,18 @@ function mmddStr(d) {
   return m + day;
 }
 
+// ============================================================
+// Google Drive 工具
+// ============================================================
+
 async function saveToDrive(buffer, fileName, mimeType) {
   const auth = await getAuth();
   const drive = google.drive({ version: 'v3', auth });
+
   const fileMetadata = { name: fileName };
-  if (DRIVE_FOLDER_ID) fileMetadata.parents = [DRIVE_FOLDER_ID];
+  if (DRIVE_FOLDER_ID) {
+    fileMetadata.parents = [DRIVE_FOLDER_ID];
+  }
+
   const stream = new Readable();
   stream.push(buffer);
-  stream.push(null);
-  const response = await drive.files.create({
-    requestBody: fileMetadata,
-    media: { mimeType: mimeType || 'image/jpeg', body: stream },
-    fields: 'id',
-  });
-  await drive.permissions.create({
-    fileId: response.data.id,
-    requestBody: { role: 'reader', type: 'anyone' },
-  });
-  return `https://drive.google.com/uc?id=${response.data.id}`;
-}
-
-async function handleDispatch(text, source, replyToken, creator) {
-  const lines = text.split('\n');
-  const parsedAll = [];
-  let inheritedDay = null;
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].replace(/^#派工\s*/, '').trim();
-    if (!line) continue;
-    const result = parseDispatchLine(line, inheritedDay);
-    if (!result) { continue; }
-    inheritedDay = result.dateStr;
-    let names = result.names;
-    if (names.length === 0) {
-      names = await getEmployeeList();
-    }
-    for (const name of names) {
-      await appendRecord('派工', result.dateStr, name, result.location, result.work, '', '', '', creator);
-      await updateEmployeeRecord(name, result.dateStr, '上工', result.location, result.work, '', '');
-    }
-    const displayNames = result.names.length > 0 ? result.names.join('.') : '全體';
-    parsedAll.push(`${result.dateStr} ${result.location ? result.location + '/' : ''}${result.work} → ${displayNames}`);
-  }
-  const reply = '✅ 已記錄派工 ' + parsedAll.length + ' 筆：\n' + parsedAll.join('\n');
-  await replyMessage(replyToken, reply);
-}
-
-async function handleCancelDispatch(text, replyToken, creator) {
-  const lines = text.split('\n');
-  const names = [];
-  const today = todayStr();
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].replace(/^#取消派工\s*/, '').trim();
-    if (!line) continue;
-    const re = /@([^\s@]+)/g;
-    let m;
-    while ((m = re.exec(line)) !== null) names.push(m[1]);
-  }
-  if (names.length === 0) {
-    await replyMessage(replyToken, '⚠️ 格式：\n#取消派工\n@宇');
-    return;
-  }
-  const sheets = await getSheetsClient();
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: SHEET_ID,
-    range: `${SHEET_NAME}!A:K`,
-  });
-  const rows = res.data.values || [];
-  const cancelled = [];
-  for (const name of names) {
-    for (let i = rows.length - 1; i >= 1; i--) {
-      const r = rows[i];
-      if (String(r[1]) === '派工' && String(r[2]) === today && String(r[3]) === name && String(r[7]) !== '已取消') {
-        await sheets.spreadsheets.values.update({
-          spreadsheetId: SHEET_ID,
-          range: `${SHEET_NAME}!H${i + 1}`,
-          valueInputOption: 'RAW',
-          requestBody: { values: [['已取消']] },
-        });
-        cancelled.push(name);
-        break;
-      }
-    }
-  }
-  const reply = cancelled.length > 0
-    ? '✅ 已取消派工：' + cancelled.join('、')
-    : '⚠️ 找不到今日派工紀錄';
-  await replyMessage(replyToken, reply);
-}
-
-function parseDispatchLine(line, inheritedDay) {
-  let text = line;
-  let dateStr = null;
-
-  const dateMatch = text.match(/^(\d{1,4})\/(\d{1,2})(?:\/(\d{1,2}))?/);
-  if (dateMatch) {
-    const now = new Date();
-    if (dateMatch[3]) {
-      dateStr = `${parseInt(dateMatch[1])}/${String(parseInt(dateMatch[2])).padStart(2,'0')}/${String(parseInt(dateMatch[3])).padStart(2,'0')}`;
-    } else {
-      dateStr = `${now.getFullYear()}/${String(parseInt(dateMatch[1])).padStart(2,'0')}/${String(parseInt(dateMatch[2])).padStart(2,'0')}`;
-    }
-    text = text.substring(dateMatch[0].length).trim();
-  } else {
-    const dayMatch = text.match(/^(星期[一二三四五六日日]|週[一二三四五六日日])/);
-    if (dayMatch) {
-      dateStr = weekdayToDateStr(dayMatch[1]);
-      text = text.substring(dayMatch[0].length).trim();
-    } else if (inheritedDay) {
-      dateStr = inheritedDay;
-    }
-  }
-  if (!dateStr) return null;
-
-  const names = [];
-  const re = /@([^\s@]+)/g;
-  let m;
-  while ((m = re.exec(text)) !== null) names.push(m[1]);
-  text = text.replace(/@[^\s@]+/g, '').trim();
-
-  let location = '';
-  let work = text;
-  const si = text.indexOf(' ');
-  if (si > -1) {
-    location = text.substring(0, si).trim();
-    work = text.substring(si + 1).trim();
-  }
-
-  return { dateStr, names, location, work };
-}
-
-function parseDateFromInput(str) {
-  const m = str.match(/^(\d{1,4})\/(\d{1,2})(?:\/(\d{1,2}))?$/);
-  if (!m) return null;
-  const now = new Date();
-  if (m[3]) {
-    return `${m[1]}/${String(Number(m[2])).padStart(2,'0')}/${String(Number(m[3])).padStart(2,'0')}`;
-  }
-  const month = Number(m[1]);
-  const day = Number(m[2]);
-  if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
-    const y = now.getFullYear();
-    return `${y}/${String(month).padStart(2,'0')}/${String(day).padStart(2,'0')}`;
-  }
-  return null;
-}
-
-async function handleLeave(text, replyToken, creator) {
-  const lines = text.split('\n');
-  const details = [];
-  const today = todayStr();
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (!line) continue;
-    const parts = line.split(/\s+/);
-    const name = parts[0] || '';
-    let leaveDate = today;
-    let reason = '';
-    const remaining = parts.slice(1);
-    if (remaining.length > 0) {
-      const parsed = parseDateFromInput(remaining[0]);
-      if (parsed) {
-        leaveDate = parsed;
-        reason = remaining.slice(1).join(' ') || '請假';
-      } else {
-        reason = remaining.join(' ') || '請假';
-      }
-    }
-    if (name) {
-      await appendRecord('請假', leaveDate, name, '', '', '', '', reason, creator);
-      await updateEmployeeRecord(name, leaveDate, '請假', '', '', '', reason);
-      details.push(name + '(' + reason + (leaveDate !== today ? ' ' + leaveDate : '') + ')');
-    }
-  }
-  const reply = details.length > 0
-    ? '✅ 已記錄請假 ' + details.length + ' 人：' + details.join('、')
-    : '⚠️ 請假格式：\n#請假\n小名 5/28 事假';
-  await replyMessage(replyToken, reply);
-}
-
-async function handleOT(text, replyToken, creator) {
-  const lines = text.split('\n');
-  const details = [];
-  const today = todayStr();
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (!line) continue;
-    const parts = line.split(/\s+/);
-    let name = parts[0] || '';
-    const hours = parts[1] || '';
-    if (!name || !hours) continue;
-    let names = [name];
-    if (name === '全體') {
-      names = await getEmployeeList();
-    }
-    for (const n of names) {
-      await appendRecord('加班', today, n, '', '', hours, '', '', creator);
-      await updateEmployeeRecord(n, today, '加班', '', '', hours, '');
-      details.push(n + ' ' + hours + 'H');
-    }
-  }
-  const reply = details.length > 0
-    ? '✅ 已記錄加班 ' + details.length + ' 筆：' + details.join('、')
-    : '⚠️ 加班格式：\n#加班\n阿豪 4\n或\n#加班\n全體 4';
-  await replyMessage(replyToken, reply);
-}
-
-async function handleReportText(source, replyToken, creator) {
-  const userId = source.userId;
-  reportMode[userId] = { ts: Date.now(), creator };
-  await replyMessage(replyToken, '📋 已開啟回報模式，請傳送照片。');
-}
-
-async function handleReportPhoto(messageId, source, replyToken, creator) {
-  const userId = source.userId;
-  const mode = reportMode[userId];
-  if (!mode) return;
-  if (Date.now() - mode.ts > REPORT_EXPIRY_MS) {
-    delete reportMode[userId];
-    return;
-  }
-  creator = creator || mode.creator;
-  const displayName = await getLineDisplayName(userId);
-  const employees = await getEmployeeList();
-  const empName = matchEmployeeName(displayName, employees) || displayName;
-  const today = todayStr();
-  const assignment = await findTodayAssignment(empName, today);
-  const site = assignment ? assignment.location : '';
-  const work = assignment ? assignment.work : '';
-  const { data: buffer, contentType } = await downloadContent(messageId);
-  const datePart = mmddStr(new Date());
-  const seq = getNextSeq(site || '未指派', empName, datePart);
-  const fileName = (site || '未指派') + '_' + empName + '_' + datePart + '_' + seq + '.jpg';
-  const photoUrl = await saveToDrive(buffer, fileName, contentType);
-  if (assignment) {
-    await appendPhotoToRecord(assignment.row, photoUrl);
-    await updateEmployeeRecord(empName, today, '上工', site, work, '', '');
-    await replyMessage(replyToken,
-      '📷 收到回報 ' + empName + '\n案場：' +
-      (site ? site + (work ? '/' + work : '') : work) +
-      '\n→ ' + fileName);
-  } else {
-    await appendRecord('回報', today, empName, site, work, '', photoUrl, '無對應派工', creator);
-    await updateEmployeeRecord(empName, today, '回報', site, work, '', '無對應派工');
-    await replyMessage(replyToken,
-      '📷 收到 ' + empName + ' 照片\n⚠️ 今日無對應派工紀錄\n→ ' + fileName);
-  }
-}
-
-const photoCounters = {};
-
-function getNextSeq(site, person, date) {
-  const key = site + '_' + person + '_' + date;
-  photoCounters[key] = (photoCounters[key] || 0) + 1;
-  return photoCounters[key];
-}
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log('LINE bot running on port ' + PORT));
