@@ -536,13 +536,19 @@ async function handleDispatch(text, source, replyToken, creator) {
       names = employees;
     }
 
+    const done = [];
     for (const name of names) {
-      await appendRecord('派工', result.dateStr, name, result.location, result.work, '', '', '', creator);
-      await updateEmployeeRecord(name, result.dateStr, '上工', result.location, result.work, '', '');
+      try {
+        await appendRecord('派工', result.dateStr, name, result.location, result.work, '', '', '', creator);
+        await updateEmployeeRecord(name, result.dateStr, '上工', result.location, result.work, '', '');
+        done.push(name);
+      } catch (e) {
+        console.error('handleDispatch employee error:', name, e.message);
+      }
     }
 
-    const displayNames = names.length > 0 ? names.join('.') : '全體';
-    parsedAll.push(`${result.dateStr} ${result.location ? result.location + '/' : ''}${result.work} → ${displayNames}`);
+    const displayNames = done.length > 0 ? done.join('.') : '全體';
+    parsedAll.push(`${result.dateStr} ${result.location ? result.location + '/' : ''}${result.work} → ${displayNames}${done.length < names.length ? (' (' + done.length + '/' + names.length + '人成功)') : ''}`);
   }
 
   const reply = '✅ 已記錄派工 ' + parsedAll.length + ' 筆：\n' + parsedAll.join('\n');
@@ -687,9 +693,13 @@ async function handleLeave(text, replyToken, creator) {
       }
     }
     if (name) {
-      await appendRecord('請假', leaveDate, name, '', '', '', '', reason, creator);
-      await updateEmployeeRecord(name, leaveDate, '請假', undefined, undefined, undefined, reason);
-      details.push(name + '(' + reason + (leaveDate !== todayStr() ? ' ' + leaveDate : '') + ')');
+      try {
+        await appendRecord('請假', leaveDate, name, '', '', '', '', reason, creator);
+        await updateEmployeeRecord(name, leaveDate, '請假', undefined, undefined, undefined, reason);
+        details.push(name + '(' + reason + (leaveDate !== todayStr() ? ' ' + leaveDate : '') + ')');
+      } catch (e) {
+        console.error('handleLeave error:', name, e.message);
+      }
     }
   }
   const reply = details.length > 0
@@ -733,9 +743,13 @@ async function handleOT(text, replyToken, creator) {
     }
 
     for (const n of names) {
-      await appendRecord('加班', otDate, n, '', '', hours, '', '', creator);
-      await updateEmployeeRecord(n, otDate, '加班', undefined, undefined, hours, '');
-      details.push(n + ' ' + hours + 'H' + (otDate !== todayStr() ? ' ' + otDate : ''));
+      try {
+        await appendRecord('加班', otDate, n, '', '', hours, '', '', creator);
+        await updateEmployeeRecord(n, otDate, '加班', undefined, undefined, hours, '');
+        details.push(n + ' ' + hours + 'H' + (otDate !== todayStr() ? ' ' + otDate : ''));
+      } catch (e) {
+        console.error('handleOT error:', n, e.message);
+      }
     }
   }
 
