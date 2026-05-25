@@ -77,11 +77,12 @@ async function handleEvent(event) {
       if (src.type !== 'user') return;
       await handleOT(text, rt, senderName);
     } else if (/^#回報/.test(text)) {
-      if (src.type !== 'group') return;
-      await handleReportText(src, rt, senderName);
+      if (src.type === 'user' || src.type === 'group') {
+        await handleReportText(src, rt, senderName);
+      }
     }
   } else if (msg.type === 'image') {
-    if (src.type === 'group') {
+    if (src.type === 'user' || src.type === 'group') {
       const senderName = await getLineDisplayName(src.userId);
       await handleReportPhoto(msg.id, src, rt, senderName);
     }
@@ -353,8 +354,8 @@ async function getAdminList() {
     const rows = res.data.values || [];
     const out = [];
     for (let i = 1; i < rows.length; i++) {
-      const id = (rows[i][0] || '').trim();
-      if (id) out.push(id);
+      const name = (rows[i][0] || '').trim();
+      if (name) out.push(name);
     }
     return out;
   } catch (e) {
@@ -450,7 +451,7 @@ async function handleCancelDispatch(text, replyToken, creator) {
     while ((m = re.exec(line)) !== null) names.push(m[1]);
   }
   if (names.length === 0) {
-    await replyMessage(replyToken, '⚠️ 格式：\n#取消派工 @宇');
+    await replyMessage(replyToken, '⚠️ 格式：\n#取消派工\n@宇');
     return;
   }
   const sheets = await getSheetsClient();
