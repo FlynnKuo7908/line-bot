@@ -61,6 +61,15 @@ async function handleEvent(event) {
         }
         await handleDispatch(text, src, rt, senderName);
       }
+    } else if (/^#取消派工/.test(text)) {
+      if (src.type === 'user' || src.type === 'group') {
+        const admins = await getAdminList();
+        if (admins.length > 0 && !admins.includes(src.userId)) {
+          await replyMessage(rt, '⚠️ 你不是管理員');
+          return;
+        }
+        await handleCancelDispatch(text, rt, senderName);
+      }
     } else if (/^#請假/.test(text)) {
       if (src.type !== 'user') return;
       await handleLeave(text, rt, senderName);
@@ -408,8 +417,8 @@ async function handleDispatch(text, source, replyToken, creator) {
   const lines = text.split('\n');
   const parsedAll = [];
   let inheritedDay = null;
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i].trim();
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].replace(/^#派工\s*/, '').trim();
     if (!line) continue;
     const result = parseDispatchLine(line, inheritedDay);
     if (!result) { continue; }
@@ -426,6 +435,49 @@ async function handleDispatch(text, source, replyToken, creator) {
     parsedAll.push(`${result.dateStr} ${result.location ? result.location + '/' : ''}${result.work} → ${displayNames}`);
   }
   const reply = '✅ 已記錄派工 ' + parsedAll.length + ' 筆：\n' + parsedAll.join('\n');
+  await replyMessage(replyToken, reply);
+}
+
+async function handleCancelDispatch(text, replyToken, creator) {
+  const lines = text.split('\n');
+  const names = [];
+  const today = todayStr();
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].replace(/^#取消派工\s*/, '').trim();
+    if (!line) continue;
+    const re = /@([^\s@]+)/g;
+    let m;
+    while ((m = re.exec(line)) !== null) names.push(m[1]);
+  }
+  if (names.length === 0) {
+    await replyMessage(replyToken, '⚠️ 格式：\n#取消派工 @宇');
+    return;
+  }
+  const sheets = await getSheetsClient();
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID,
+    range: `${SHEET_NAME}!A:K`,
+  });
+  const rows = res.data.values || [];
+  const cancelled = [];
+  for (const name of names) {
+    for (let i = rows.length - 1; i >= 1; i--) {
+      const r = rows[i];
+      if (String(r[1]) === '派工' && String(r[2]) === today && String(r[3]) === name && String(r[7]) !== '已取消') {
+        await sheets.spreadsheets.values.update({
+          spreadsheetId: SHEET_ID,
+          range: `${SHEET_NAME}!H${i + 1}`,
+          valueInputOption: 'RAW',
+          requestBody: { values: [['已取消']] },
+        });
+        cancelled.push(name);
+        break;
+      }
+    }
+  }
+  const reply = cancelled.length > 0
+    ? '✅ 已取消派工：' + cancelled.join('、')
+    : '⚠️ 找不到今日派工紀錄';
   await replyMessage(replyToken, reply);
 }
 
