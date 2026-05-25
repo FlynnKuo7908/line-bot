@@ -266,9 +266,11 @@ async function updateEmployeeRecord(name, dateStr, status, location, work, hours
         valueInputOption: 'RAW',
         requestBody: { values: [merged] },
       });
+    } else {
+      console.error('updateEmployeeRecord: row not found for', name, dateStr, 'in', title);
     }
   } catch (e) {
-    console.error('updateEmployeeRecord error:', e.message);
+    console.error('updateEmployeeRecord error for', name, dateStr, status, e.message);
   }
 }
 
@@ -455,6 +457,32 @@ function mmddStr(d) {
 }
 
 // ============================================================
+// 通用日期解析（供 #請假 / #加班 / #取消派工 使用）
+// ============================================================
+
+function parseDateFromInput(str) {
+  const m = str.match(/^(\d{1,4})\/(\d{1,2})(?:\/(\d{1,2}))?$/);
+  if (m) {
+    const now = new Date(new Date().getTime() + 8 * 60 * 60 * 1000);
+    if (m[3]) {
+      return `${m[1]}/${String(Number(m[2])).padStart(2,'0')}/${String(Number(m[3])).padStart(2,'0')}`;
+    }
+    const month = Number(m[1]);
+    const day = Number(m[2]);
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      const y = now.getFullYear();
+      return `${y}/${String(month).padStart(2,'0')}/${String(day).padStart(2,'0')}`;
+    }
+    return null;
+  }
+  const dayMatch = str.match(/^(星期[一二三四五六日日]|週[一二三四五六日日])/);
+  if (dayMatch) {
+    return weekdayToDateStr(dayMatch[1]);
+  }
+  return null;
+}
+
+// ============================================================
 // Google Drive 工具
 // ============================================================
 
@@ -523,36 +551,54 @@ async function handleDispatch(text, source, replyToken, creator) {
 
 async function handleCancelDispatch(text, replyToken, creator) {
   const lines = text.split('\n');
-  const names = [];
-  const today = todayStr();
+  const entries = [];
   const employees = await getEmployeeList();
+  let currentDate = todayStr();
+
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].replace(/^#取消派工\s*/, '').trim();
     if (!line) continue;
+
+    const parsedDate = parseDateFromInput(line);
+    if (parsedDate) {
+      currentDate = parsedDate;
+      if (/^@/.test(line)) continue;
+      const re2 = /@([^\s@]+)/g;
+      let m2;
+      while ((m2 = re2.exec(line)) !== null) {
+        const raw = m2[1];
+        const matched = matchEmployeeName(raw, employees);
+        entries.push({ name: matched || raw, date: currentDate });
+      }
+      continue;
+    }
+
     const re = /@([^\s@]+)/g;
     let m;
     while ((m = re.exec(line)) !== null) {
       const raw = m[1];
       const matched = matchEmployeeName(raw, employees);
-      names.push(matched || raw);
+      entries.push({ name: matched || raw, date: currentDate });
     }
   }
-  if (names.length === 0) {
-    await replyMessage(replyToken, '⚠️ 格式：\n#取消派工\n@宇');
+
+  if (entries.length === 0) {
+    await replyMessage(replyToken, '⚠️ 格式：\n#取消派工\n@宇\n或\n#取消派工\n5/25\n@宇');
     return;
   }
+
   const sheets = await getSheetsClient();
-  const res = await sheets.spreadsheets.values.get({
+  const allRes = await sheets.spreadsheets.values.get({
     spreadsheetId: SHEET_ID,
     range: `${SHEET_NAME}!A:K`,
   });
-  const rows = res.data.values || [];
+  const rows = allRes.data.values || [];
   const cancelled = [];
-  for (const name of names) {
+  for (const { name, date } of entries) {
     for (let i = rows.length - 1; i >= 1; i--) {
       const r = rows[i];
       const rowName = String(r[3] || '');
-      const isMatch = String(r[1]) === '派工' && String(r[2]) === today && String(r[7]) !== '已取消'
+      const isMatch = String(r[1]) === '派工' && String(r[2]) === date && String(r[7]) !== '已取消'
         && (rowName === name || rowName === matchEmployeeName(name, employees) || name === matchEmployeeName(rowName, employees));
       if (isMatch) {
         await sheets.spreadsheets.values.update({
@@ -561,14 +607,14 @@ async function handleCancelDispatch(text, replyToken, creator) {
           valueInputOption: 'RAW',
           requestBody: { values: [['已取消']] },
         });
-        cancelled.push(name);
+        cancelled.push(name + (date !== todayStr() ? ' ' + date : ''));
         break;
       }
     }
   }
   const reply = cancelled.length > 0
     ? '✅ 已取消派工：' + cancelled.join('、')
-    : '⚠️ 找不到今日派工紀錄';
+    : '⚠️ 找不到派工紀錄';
   await replyMessage(replyToken, reply);
 }
 
@@ -614,29 +660,12 @@ function parseDispatchLine(line, inheritedDay) {
 }
 
 // ============================================================
-// #請假 處理
+// #請假 處理（支援 5/28、週一；沒寫日期 = 今天）
 // ============================================================
-
-function parseDateFromInput(str) {
-  const m = str.match(/^(\d{1,4})\/(\d{1,2})(?:\/(\d{1,2}))?$/);
-  if (!m) return null;
-  const now = new Date(new Date().getTime() + 8 * 60 * 60 * 1000);
-  if (m[3]) {
-    return `${m[1]}/${String(Number(m[2])).padStart(2,'0')}/${String(Number(m[3])).padStart(2,'0')}`;
-  }
-  const month = Number(m[1]);
-  const day = Number(m[2]);
-  if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
-    const y = now.getFullYear();
-    return `${y}/${String(month).padStart(2,'0')}/${String(day).padStart(2,'0')}`;
-  }
-  return null;
-}
 
 async function handleLeave(text, replyToken, creator) {
   const lines = text.split('\n');
   const details = [];
-  const today = todayStr();
   const employees = await getEmployeeList();
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i].trim();
@@ -645,7 +674,7 @@ async function handleLeave(text, replyToken, creator) {
     let name = parts[0] || '';
     const matched = matchEmployeeName(name, employees);
     if (matched) name = matched;
-    let leaveDate = today;
+    let leaveDate = todayStr();
     let reason = '';
     const remaining = parts.slice(1);
     if (remaining.length > 0) {
@@ -660,30 +689,39 @@ async function handleLeave(text, replyToken, creator) {
     if (name) {
       await appendRecord('請假', leaveDate, name, '', '', '', '', reason, creator);
       await updateEmployeeRecord(name, leaveDate, '請假', undefined, undefined, undefined, reason);
-      details.push(name + '(' + reason + (leaveDate !== today ? ' ' + leaveDate : '') + ')');
+      details.push(name + '(' + reason + (leaveDate !== todayStr() ? ' ' + leaveDate : '') + ')');
     }
   }
   const reply = details.length > 0
     ? '✅ 已記錄請假 ' + details.length + ' 人：' + details.join('、')
-    : '⚠️ 請假格式：\n#請假\n小名 5/28 事假';
+    : '⚠️ 請假格式：\n#請假\n小名 事假\n小名 5/28 事假\n小名 週一 事假';
   await replyMessage(replyToken, reply);
 }
 // ============================================================
-// #加班 處理
+// #加班 處理（支援 5/25 阿豪 4、週一 阿豪 4、阿豪 4 = 今天）
 // ============================================================
 
 async function handleOT(text, replyToken, creator) {
   const lines = text.split('\n');
   const details = [];
-  const today = todayStr();
   const employees = await getEmployeeList();
 
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i].trim();
     if (!line) continue;
     const parts = line.split(/\s+/);
-    let name = parts[0] || '';
-    const hours = parts[1] || '';
+
+    let otDate = todayStr();
+    let nameIdx = 0;
+
+    const parsedDate = parseDateFromInput(parts[0]);
+    if (parsedDate) {
+      otDate = parsedDate;
+      nameIdx = 1;
+    }
+
+    let name = parts[nameIdx] || '';
+    const hours = parts[nameIdx + 1] || '';
     if (!name || !hours) continue;
 
     let names = [name];
@@ -695,15 +733,15 @@ async function handleOT(text, replyToken, creator) {
     }
 
     for (const n of names) {
-      await appendRecord('加班', today, n, '', '', hours, '', '', creator);
-      await updateEmployeeRecord(n, today, '加班', undefined, undefined, hours, '');
-      details.push(n + ' ' + hours + 'H');
+      await appendRecord('加班', otDate, n, '', '', hours, '', '', creator);
+      await updateEmployeeRecord(n, otDate, '加班', undefined, undefined, hours, '');
+      details.push(n + ' ' + hours + 'H' + (otDate !== todayStr() ? ' ' + otDate : ''));
     }
   }
 
   const reply = details.length > 0
     ? '✅ 已記錄加班 ' + details.length + ' 筆：' + details.join('、')
-    : '⚠️ 加班格式：\n#加班\n阿豪 4\n或\n#加班\n全體 4';
+    : '⚠️ 加班格式：\n#加班\n阿豪 4\n5/25 阿豪 4\n週一 阿豪 4\n全體 4';
   await replyMessage(replyToken, reply);
 }
 
@@ -714,7 +752,7 @@ async function handleOT(text, replyToken, creator) {
 async function handleReportText(source, replyToken, creator) {
   const userId = source.userId;
   reportMode[userId] = { ts: Date.now(), creator };
-  await replyMessage(replyToken, '📋 已開啟回報模式，請傳送照片。');
+  await replyMessage(replyToken, '📋 已開啟回報模式（10分鐘內有效，可再打 #回報 重置時間），請傳送照片。');
 }
 
 // ============================================================
