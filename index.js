@@ -22,13 +22,15 @@ const SHEET_ID           = process.env.SHEET_ID || '';
 const DRIVE_FOLDER_ID    = process.env.DRIVE_FOLDER_ID || '';
 const SHEET_NAME         = process.env.SHEET_NAME || '派工紀錄';
 const EMPLOYEE_SHEET     = process.env.EMPLOYEE_SHEET_NAME || '員工清單';
-const REPORT_EXPIRY_MS   = (parseInt(process.env.REPORT_EXPIRY_MINUTES) || 10) * 60 * 1000;
+const REPORT_EXPIRY_MS   = (parseInt(process.env.REPORT_EXPIRY_MINUTES) || 5) * 60 * 1000;
 
 // ============================================================
-// 記憶體暫存
+// 記憶體暫存（省 API 讀取配額）
 // ============================================================
 
 const reportMode = {};
+const knownSheets = new Set();
+let nextSeq = 0;
 
 // ============================================================
 // Render 健康檢查（GET /）
@@ -212,12 +214,13 @@ function dateStrWithWeek(d) {
 async function ensureEmployeeSheet(name, dateStr) {
   const sheets = await getSheetsClient();
   const safe = name.replace(/[/\\?[\]*:]/g, '_');
-
   const parts = dateStr.split('/');
   const year = parseInt(parts[0]);
   const month = parseInt(parts[1]);
-
   const title = `員工:${safe} ${year}/${month}`;
+
+  if (knownSheets.has(title)) return title;
+
   const meta = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
   let sheet = meta.data.sheets.find(s => s.properties.title === title);
 
@@ -240,6 +243,8 @@ async function ensureEmployeeSheet(name, dateStr) {
       requestBody: { values: rows },
     });
   }
+
+  knownSheets.add(title);
   return title;
 }
 
@@ -247,14 +252,14 @@ async function updateEmployeeRecord(name, dateStr, status, location, work, hours
   try {
     const title = await ensureEmployeeSheet(name, dateStr);
     const sheets = await getSheetsClient();
-    const rowNum = await findEmployeeRowByDate(sheets, title, dateStr);
+    const rowNum = parseInt(dateStr.split('/')[2]) + 1;
     if (rowNum > 0) {
       const existing = await sheets.spreadsheets.values.get({
         spreadsheetId: SHEET_ID, range: `${title}!B${rowNum}:F${rowNum}`,
       });
       const cur = existing.data.values && existing.data.values[0] ? existing.data.values[0] : ['','','','',''];
       const merged = [
-        status || cur[0] || '',
+        status !== undefined ? status : (cur[0] || ''),
         location !== undefined ? location : (cur[1] || ''),
         work !== undefined ? work : (cur[2] || ''),
         hours !== undefined ? hours : (cur[3] || ''),
@@ -266,25 +271,10 @@ async function updateEmployeeRecord(name, dateStr, status, location, work, hours
         valueInputOption: 'RAW',
         requestBody: { values: [merged] },
       });
-    } else {
-      console.error('updateEmployeeRecord: row not found for', name, dateStr, 'in', title);
     }
   } catch (e) {
     console.error('updateEmployeeRecord error for', name, dateStr, status, e.message);
   }
-}
-
-async function findEmployeeRowByDate(sheets, title, dateStr) {
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: SHEET_ID, range: `${title}!A:A`,
-  });
-  const dates = res.data.values || [];
-  const plain = dateStr.replace(/\(.\)$/, '');
-  for (let i = 0; i < dates.length; i++) {
-    const cell = (dates[i][0] || '').replace(/\(.\)$/, '');
-    if (cell === plain) return i + 1;
-  }
-  return -1;
 }
 
 async function getOrCreateSheet() {
@@ -315,15 +305,22 @@ async function getOrCreateSheet() {
 }
 
 async function getNextSeq() {
-  const sheets = await getSheetsClient();
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: SHEET_ID,
-    range: `${SHEET_NAME}!A:A`,
-  });
-  const vals = res.data.values || [];
-  if (vals.length <= 1) return 1;
-  const last = parseInt(vals[vals.length - 1][0]);
-  return isNaN(last) ? vals.length : last + 1;
+  if (nextSeq === 0) {
+    const sheets = await getSheetsClient();
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: SHEET_ID,
+      range: `${SHEET_NAME}!A:A`,
+    });
+    const vals = res.data.values || [];
+    if (vals.length <= 1) {
+      nextSeq = 0;
+    } else {
+      const last = parseInt(vals[vals.length - 1][0]);
+      nextSeq = isNaN(last) ? vals.length : last;
+    }
+  }
+  nextSeq++;
+  return nextSeq;
 }
 
 async function appendRecord(type, date, person, location, work, hours, photoUrl, note, creator) {
@@ -613,6 +610,7 @@ async function handleCancelDispatch(text, replyToken, creator) {
           valueInputOption: 'RAW',
           requestBody: { values: [['已取消']] },
         });
+        await updateEmployeeRecord(name, date, '', '', '', undefined, '已取消');
         cancelled.push(name + (date !== todayStr() ? ' ' + date : ''));
         break;
       }
@@ -707,8 +705,9 @@ async function handleLeave(text, replyToken, creator) {
     : '⚠️ 請假格式：\n#請假\n小名 事假\n小名 5/28 事假\n小名 週一 事假';
   await replyMessage(replyToken, reply);
 }
+
 // ============================================================
-// #加班 處理（支援 5/25 阿豪 4、週一 阿豪 4、阿豪 4 = 今天）
+// #加班 處理（不蓋狀態，只填加班欄）
 // ============================================================
 
 async function handleOT(text, replyToken, creator) {
@@ -745,7 +744,7 @@ async function handleOT(text, replyToken, creator) {
     for (const n of names) {
       try {
         await appendRecord('加班', otDate, n, '', '', hours, '', '', creator);
-        await updateEmployeeRecord(n, otDate, '加班', undefined, undefined, hours, '');
+        await updateEmployeeRecord(n, otDate, undefined, undefined, undefined, hours, '');
         details.push(n + ' ' + hours + 'H' + (otDate !== todayStr() ? ' ' + otDate : ''));
       } catch (e) {
         console.error('handleOT error:', n, e.message);
@@ -766,7 +765,7 @@ async function handleOT(text, replyToken, creator) {
 async function handleReportText(source, replyToken, creator) {
   const userId = source.userId;
   reportMode[userId] = { ts: Date.now(), creator };
-  await replyMessage(replyToken, '📋 已開啟回報模式（10分鐘內有效，可再打 #回報 重置時間），請傳送照片。');
+  await replyMessage(replyToken, '📋 已開啟回報模式（5分鐘內有效，可再打 #回報 重置時間），請傳送照片。');
 }
 
 // ============================================================
@@ -780,49 +779,56 @@ async function handleReportPhoto(messageId, source, replyToken, creator) {
 
   if (Date.now() - mode.ts > REPORT_EXPIRY_MS) {
     delete reportMode[userId];
+    await replyMessage(replyToken, '上傳時間結束，若還需上傳請重新輸入 #回報');
     return;
   }
-  creator = creator || mode.creator;
 
-  const displayName = await getLineDisplayName(userId);
-  const employees = await getEmployeeList();
-  const empName = matchEmployeeName(displayName, employees) || displayName;
-  const today = todayStr();
+  try {
+    creator = creator || mode.creator;
 
-  const assignment = await findTodayAssignment(empName, today);
-  const site = assignment ? assignment.location : '';
-  const work = assignment ? assignment.work : '';
+    const displayName = await getLineDisplayName(userId);
+    const employees = await getEmployeeList();
+    const empName = matchEmployeeName(displayName, employees) || displayName;
+    const today = todayStr();
 
-  const { data: buffer, contentType } = await downloadContent(messageId);
+    const assignment = await findTodayAssignment(empName, today);
+    const site = assignment ? assignment.location : '';
+    const work = assignment ? assignment.work : '';
 
-  const datePart = mmddStr(new Date(new Date().getTime() + 8 * 60 * 60 * 1000));
-  const seq = getNextSeq(site || '未指派', empName, datePart);
-  const fileName = (site || '未指派') + '_' + empName + '_' + datePart + '_' + seq + '.jpg';
+    const { data: buffer, contentType } = await downloadContent(messageId);
 
-  const photoUrl = await saveToDrive(buffer, fileName, contentType);
+    const datePart = mmddStr(new Date(new Date().getTime() + 8 * 60 * 60 * 1000));
+    const seq = getPhotoSeq(site || '未指派', empName, datePart);
+    const fileName = (site || '未指派') + '_' + empName + '_' + datePart + '_' + seq + '.jpg';
 
-  if (assignment) {
-    await appendPhotoToRecord(assignment.row, photoUrl);
-    await updateEmployeeRecord(empName, today, '上工', site, work, '', '');
-    await replyMessage(replyToken,
-      '📷 收到回報 ' + empName + '\n案場：' +
-      (site ? site + (work ? '/' + work : '') : work) +
-      '\n→ ' + fileName);
-  } else {
-    await appendRecord('回報', today, empName, site, work, '', photoUrl, '無對應派工', creator);
-    await updateEmployeeRecord(empName, today, '回報', site, work, '', '無對應派工');
-    await replyMessage(replyToken,
-      '📷 收到 ' + empName + ' 照片\n⚠️ 今日無對應派工紀錄\n→ ' + fileName);
+    const photoUrl = await saveToDrive(buffer, fileName, contentType);
+
+    if (assignment) {
+      await appendPhotoToRecord(assignment.row, photoUrl);
+      await updateEmployeeRecord(empName, today, '上工', site, work, '', '');
+      await replyMessage(replyToken,
+        '📷 收到回報 ' + empName + '\n案場：' +
+        (site ? site + (work ? '/' + work : '') : work) +
+        '\n→ ' + fileName);
+    } else {
+      await appendRecord('回報', today, empName, site, work, '', photoUrl, '無對應派工', creator);
+      await updateEmployeeRecord(empName, today, '回報', site, work, '', '無對應派工');
+      await replyMessage(replyToken,
+        '📷 收到 ' + empName + ' 照片\n⚠️ 今日無對應派工紀錄\n→ ' + fileName);
+    }
+  } catch (e) {
+    console.error('handleReportPhoto error:', e.message);
+    await replyMessage(replyToken, '⚠️ 照片上傳失敗：' + e.message);
   }
 }
 
 // ============================================================
-// 照片序號
+// 照片序號（改名避免與派工序號函式衝突）
 // ============================================================
 
 const photoCounters = {};
 
-function getNextSeq(site, person, date) {
+function getPhotoSeq(site, person, date) {
   const key = site + '_' + person + '_' + date;
   photoCounters[key] = (photoCounters[key] || 0) + 1;
   return photoCounters[key];
