@@ -486,7 +486,7 @@ function parseDateFromInput(str) {
 
 async function saveToDrive(buffer, fileName, mimeType) {
   if (!GAS_WEBHOOK_URL) {
-    throw new Error('GAS_WEBHOOK_URL 未設定');
+    throw new Error('GAS_WEBHOOK_URL 未設定，請先在 Render 環境變數設定 GAS 網址');
   }
   const imageBase64 = buffer.toString('base64');
   const res = await axios.post(GAS_WEBHOOK_URL, {
