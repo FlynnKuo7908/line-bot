@@ -26,7 +26,7 @@ const REPORT_EXPIRY_MS   = (parseInt(process.env.REPORT_EXPIRY_MINUTES) || 5) * 
 const GAS_WEBHOOK_URL    = process.env.GAS_WEBHOOK_URL || '';
 
 // ============================================================
-// 記憶體暫存（省 API 讀取配額）
+// 記憶體暫存
 // ============================================================
 
 const reportMode = {};
@@ -547,37 +547,26 @@ async function handleCancelDispatch(text, replyToken, creator) {
   const lines = text.split('\n');
   const entries = [];
   const employees = await getEmployeeList();
-  let currentDate = todayStr();
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].replace(/^#取消派工\s*/, '').trim();
     if (!line) continue;
-
-    const parsedDate = parseDateFromInput(line);
-    if (parsedDate) {
-      currentDate = parsedDate;
-      if (/^@/.test(line)) continue;
-      const re2 = /@([^\s@]+)/g;
-      let m2;
-      while ((m2 = re2.exec(line)) !== null) {
-        const raw = m2[1];
-        const matched = matchEmployeeName(raw, employees);
-        entries.push({ name: matched || raw, date: currentDate });
-      }
-      continue;
+    const parts = line.split(/\s+/);
+    let name = parts[0] || '';
+    const matched = matchEmployeeName(name, employees);
+    if (matched) name = matched;
+    let cancelDate = todayStr();
+    if (parts.length > 1) {
+      const parsed = parseDateFromInput(parts[1]);
+      if (parsed) cancelDate = parsed;
     }
-
-    const re = /@([^\s@]+)/g;
-    let m;
-    while ((m = re.exec(line)) !== null) {
-      const raw = m[1];
-      const matched = matchEmployeeName(raw, employees);
-      entries.push({ name: matched || raw, date: currentDate });
+    if (name) {
+      entries.push({ name, date: cancelDate });
     }
   }
 
   if (entries.length === 0) {
-    await replyMessage(replyToken, '⚠️ 格式：\n#取消派工\n@宇\n或\n#取消派工\n5/25\n@宇');
+    await replyMessage(replyToken, '⚠️ 格式：\n#取消派工\n阿豪\n小宇 5/25');
     return;
   }
 
@@ -601,7 +590,6 @@ async function handleCancelDispatch(text, replyToken, creator) {
           valueInputOption: 'RAW',
           requestBody: { values: [['已取消']] },
         });
-        await updateEmployeeRecord(name, date, '', '', '', undefined, '已取消');
         cancelled.push(name + (date !== todayStr() ? ' ' + date : ''));
         break;
       }
