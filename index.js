@@ -23,6 +23,7 @@ const DRIVE_FOLDER_ID    = process.env.DRIVE_FOLDER_ID || '';
 const SHEET_NAME         = process.env.SHEET_NAME || '派工紀錄';
 const EMPLOYEE_SHEET     = process.env.EMPLOYEE_SHEET_NAME || '員工清單';
 const REPORT_EXPIRY_MS   = (parseInt(process.env.REPORT_EXPIRY_MINUTES) || 5) * 60 * 1000;
+const GAS_WEBHOOK_URL    = process.env.GAS_WEBHOOK_URL || '';
 
 // ============================================================
 // 記憶體暫存（省 API 讀取配額）
@@ -480,34 +481,24 @@ function parseDateFromInput(str) {
 }
 
 // ============================================================
-// Google Drive 工具
+// Google Drive 工具（透過 GAS 用你的帳號上傳）
 // ============================================================
 
 async function saveToDrive(buffer, fileName, mimeType) {
-  const auth = await getAuth();
-  const drive = google.drive({ version: 'v3', auth });
-
-  const fileMetadata = { name: fileName };
-  if (DRIVE_FOLDER_ID) {
-    fileMetadata.parents = [DRIVE_FOLDER_ID];
+  if (!GAS_WEBHOOK_URL) {
+    throw new Error('GAS_WEBHOOK_URL 未設定');
   }
-
-  const stream = new Readable();
-  stream.push(buffer);
-  stream.push(null);
-
-  const response = await drive.files.create({
-    requestBody: fileMetadata,
-    media: { mimeType: mimeType || 'image/jpeg', body: stream },
-    fields: 'id',
-  });
-
-  await drive.permissions.create({
-    fileId: response.data.id,
-    requestBody: { role: 'reader', type: 'anyone' },
-  });
-
-  return `https://drive.google.com/uc?id=${response.data.id}`;
+  const imageBase64 = buffer.toString('base64');
+  const res = await axios.post(GAS_WEBHOOK_URL, {
+    imageBase64,
+    fileName,
+    mimeType: mimeType || 'image/jpeg',
+    folderId: DRIVE_FOLDER_ID,
+  }, { timeout: 30000 });
+  if (res.data && res.data.success) {
+    return res.data.url;
+  }
+  throw new Error(res.data ? res.data.error : 'GAS 回傳異常');
 }
 
 // ============================================================
