@@ -8,13 +8,8 @@ const crypto = require('crypto');
 const express = require('express');
 const axios = require('axios');
 const { google } = require('googleapis');
-const { Readable } = require('stream');
 
 const app = express();
-
-// ============================================================
-// 環境變數（Render 設定）
-// ============================================================
 
 const LINE_ACCESS_TOKEN  = process.env.LINE_CHANNEL_ACCESS_TOKEN || '';
 const LINE_SECRET        = process.env.LINE_CHANNEL_SECRET || '';
@@ -25,23 +20,11 @@ const EMPLOYEE_SHEET     = process.env.EMPLOYEE_SHEET_NAME || '員工清單';
 const REPORT_EXPIRY_MS   = (parseInt(process.env.REPORT_EXPIRY_MINUTES) || 5) * 60 * 1000;
 const GAS_WEBHOOK_URL    = process.env.GAS_WEBHOOK_URL || '';
 
-// ============================================================
-// 記憶體暫存
-// ============================================================
-
 const reportMode = {};
 const knownSheets = new Set();
 let nextSeq = 0;
 
-// ============================================================
-// Render 健康檢查（GET /）
-// ============================================================
-
 app.get('/', (req, res) => res.send('OK'));
-
-// ============================================================
-// LINE Webhook 入口（POST /）
-// ============================================================
 
 app.post('/', express.json({
   verify: (req, res, buf) => { req.rawBody = buf.toString(); },
@@ -66,10 +49,6 @@ app.post('/', express.json({
 
   res.status(200).json({ ok: true });
 });
-
-// ============================================================
-// 事件分派
-// ============================================================
 
 async function handleEvent(event) {
   if (event.type !== 'message') return;
@@ -120,12 +99,7 @@ async function handleEvent(event) {
       await handleReportPhoto(msg.id, src, rt, senderName);
     }
   }
-
 }
-
-// ============================================================
-// LINE 簽章驗證
-// ============================================================
 
 function verifySignature(body, signature) {
   if (!LINE_SECRET || !signature) return false;
@@ -137,10 +111,6 @@ function verifySignature(body, signature) {
     return false;
   }
 }
-
-// ============================================================
-// LINE API 工具
-// ============================================================
 
 const LINE_API = 'https://api.line.me/v2/bot';
 const LINE_DATA = 'https://api-data.line.me/v2/bot';
@@ -178,10 +148,6 @@ async function replyMessage(replyToken, text) {
     });
   } catch (e) {}
 }
-
-// ============================================================
-// Google Sheets 工具
-// ============================================================
 
 async function getAuth() {
   const credsJson = process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON;
@@ -373,10 +339,6 @@ async function findTodayAssignment(person, dateStr) {
   return null;
 }
 
-// ============================================================
-// 員工清單
-// ============================================================
-
 async function getEmployeeList() {
   const sheets = await getSheetsClient();
   const res = await sheets.spreadsheets.values.get({
@@ -398,10 +360,6 @@ function matchEmployeeName(lineName, employees) {
   for (const e of employees) { if (e.includes(lineName)) return e; }
   return null;
 }
-
-// ============================================================
-// 日期工具
-// ============================================================
 
 async function getAdminList() {
   try {
@@ -454,10 +412,6 @@ function mmddStr(d) {
   return m + day;
 }
 
-// ============================================================
-// 通用日期解析（供 #請假 / #加班 / #取消派工 使用）
-// ============================================================
-
 function parseDateFromInput(str) {
   const m = str.match(/^(\d{1,4})\/(\d{1,2})(?:\/(\d{1,2}))?$/);
   if (m) {
@@ -480,10 +434,6 @@ function parseDateFromInput(str) {
   return null;
 }
 
-// ============================================================
-// Google Drive 工具（透過 GAS 用你的帳號上傳）
-// ============================================================
-
 async function saveToDrive(buffer, fileName, mimeType) {
   if (!GAS_WEBHOOK_URL) {
     throw new Error('GAS_WEBHOOK_URL 未設定，請先在 Render 環境變數設定 GAS 網址');
@@ -500,10 +450,6 @@ async function saveToDrive(buffer, fileName, mimeType) {
   }
   throw new Error(res.data ? res.data.error : 'GAS 回傳異常');
 }
-
-// ============================================================
-// #派工 處理
-// ============================================================
 
 async function handleDispatch(text, source, replyToken, creator) {
   const lines = text.split('\n');
@@ -590,6 +536,7 @@ async function handleCancelDispatch(text, replyToken, creator) {
           valueInputOption: 'RAW',
           requestBody: { values: [['已取消']] },
         });
+        await updateEmployeeRecord(rowName, date, '', '', '', undefined, '已取消');
         cancelled.push(name + (date !== todayStr() ? ' ' + date : ''));
         break;
       }
@@ -642,10 +589,6 @@ function parseDispatchLine(line, inheritedDay) {
   return { dateStr, names, location, work };
 }
 
-// ============================================================
-// #請假 處理（支援 5/28、週一；沒寫日期 = 今天）
-// ============================================================
-
 async function handleLeave(text, replyToken, creator) {
   const lines = text.split('\n');
   const details = [];
@@ -684,10 +627,6 @@ async function handleLeave(text, replyToken, creator) {
     : '⚠️ 請假格式：\n#請假\n小名 事假\n小名 5/28 事假\n小名 週一 事假';
   await replyMessage(replyToken, reply);
 }
-
-// ============================================================
-// #加班 處理（不蓋狀態，只填加班欄）
-// ============================================================
 
 async function handleOT(text, replyToken, creator) {
   const lines = text.split('\n');
@@ -737,19 +676,11 @@ async function handleOT(text, replyToken, creator) {
   await replyMessage(replyToken, reply);
 }
 
-// ============================================================
-// #回報 文字
-// ============================================================
-
 async function handleReportText(source, replyToken, creator) {
   const userId = source.userId;
   reportMode[userId] = { ts: Date.now(), creator };
   await replyMessage(replyToken, '📋 已開啟回報模式（5分鐘內有效，可再打 #回報 重置時間），請傳送照片。');
 }
-
-// ============================================================
-// #回報 照片
-// ============================================================
 
 async function handleReportPhoto(messageId, source, replyToken, creator) {
   const userId = source.userId;
@@ -800,10 +731,6 @@ async function handleReportPhoto(messageId, source, replyToken, creator) {
     await replyMessage(replyToken, '⚠️ 照片上傳失敗：' + e.message);
   }
 }
-
-// ============================================================
-// 照片序號（改名避免與派工序號函式衝突）
-// ============================================================
 
 const photoCounters = {};
 
